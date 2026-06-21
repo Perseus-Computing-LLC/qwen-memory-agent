@@ -1,24 +1,16 @@
-"""Mimir MemoryAgent — Persistent AI memory on Qwen Cloud.
+"""Mimir MemoryAgent -- persistent AI memory on Qwen Cloud.
 
-Core agent loop: recall → reason → remember.
+Loop: recall -> reason -> remember -> (periodic) groom.
 
-Architecture:
-    User ↔ agent.py ↔ Qwen Cloud (reasoning)
-                       ↕
-                  Mimir (memory)
-
-Each turn:
-    1. Recall relevant memories from Mimir (FTS5 + vector hybrid search)
-    2. Pass user message + recalled context to Qwen Cloud model
-    3. Extract new facts/preferences/decisions from the response
-    4. Store them in Mimir with appropriate decay parameters
-    5. Periodically run memory grooming (decay + cohere)
+Deep Qwen Cloud integration:
+  * Reasoning over recalled context with qwen-max-longcontext
+  * Memory writes via Qwen native function calling (store_memories tool)
+  * Hybrid recall (FTS5 + Qwen text-embedding-v3 cosine similarity)
 """
 
 import os
 import sys
 import json
-import time
 import textwrap
 from datetime import datetime, timezone
 
@@ -27,312 +19,209 @@ from qwen_client import QwenClient
 
 
 SYSTEM_PROMPT = textwrap.dedent("""\
-    You are Mimir MemoryAgent — a persistent-memory AI assistant powered by
-    Qwen Cloud reasoning models and the Mimir memory backend.
+    You are Mimir MemoryAgent -- a persistent-memory assistant powered by Qwen
+    Cloud and a SQLite-backed memory store.
 
-    Core capabilities:
-    1. Remember facts and preferences across sessions
-    2. Recall relevant context from previous conversations
-    3. Accumulate knowledge over time — getting smarter with each interaction
-    4. Forget outdated/unused information (Ebbinghaus decay)
-    5. Surface memory at decision points for human-in-the-loop review
+    Relevant memories from past sessions are provided before each message. Use
+    them to give informed, personalized answers. When you recall something from
+    a previous session, say so explicitly. When you are unsure, ask.
 
-    How you work:
-    Before each response, relevant memories from past sessions are retrieved
-    from Mimir and provided as context. Use this context to give informed,
-    personalized responses. After each response, new facts are stored for
-    future recall.
-
-    Memory categories you track:
-    - user_preference: User likes/dislikes, preferred tools, workflow habits
-    - project_fact: Project names, goals, architecture decisions, key files
-    - decision: Decisions made and the rationale behind them
-    - correction: When the user corrects you — learn from it
-    - insight: Patterns and learnings discovered during interactions
-
-    Be direct, helpful, and demonstrate your memory capabilities.
-    When you recall something from a past session, mention it explicitly.
-    When you learn something new, flag it for storage.
-    When you're unsure, ask rather than assume.
+    Memory categories: user_preference, project_fact, decision, correction, insight.
     """)
 
-MEMORY_EXTRACTION_PROMPT = textwrap.dedent("""\
-    Extract key facts, preferences, and decisions from this conversation turn.
+# Qwen function-calling schema: the model decides what (if anything) to persist.
+STORE_TOOL = [{
+    "type": "function",
+    "function": {
+        "name": "store_memories",
+        "description": (
+            "Persist genuinely new facts, preferences, decisions, corrections, "
+            "or insights learned from the latest exchange. Omit anything already "
+            "known or trivial. Call with an empty list if nothing is worth saving."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "category": {
+                                "type": "string",
+                                "enum": ["user_preference", "project_fact",
+                                         "decision", "correction", "insight"],
+                            },
+                            "key": {
+                                "type": "string",
+                                "description": "short hyphenated-lowercase id",
+                            },
+                            "content": {"type": "string"},
+                            "importance": {
+                                "type": "number",
+                                "description": "0.0-1.0; 1.0 = critical, never forget",
+                            },
+                        },
+                        "required": ["category", "key", "content", "importance"],
+                    },
+                }
+            },
+            "required": ["items"],
+        },
+    },
+}]
 
-    For each item, identify:
-    - category: user_preference, project_fact, decision, correction, or insight
-    - key: short unique identifier (hyphenated-lowercase)
-    - content: what was learned
-    - importance: 0.0–1.0 (1.0 = critical, never forget)
-
-    Return as JSON array. Only include genuinely new information.
-    If nothing new was learned, return an empty array [].
-
-    Conversation:
-    User: {user_message}
-    Assistant: {assistant_response}
-
-    Return ONLY the JSON array, no other text:
-    """)
-
-MIMIR_BINARY = "/opt/data/webui/minions/.minions-data/mimir/mimir"
-MIMIR_DB = "/opt/data/webui/minions/.minions-data/mimir/mimir.db"
+DEFAULT_MODEL = os.environ.get("QWEN_MODEL", "qwen-max-longcontext")
+TOOL_MODEL = os.environ.get("QWEN_TOOL_MODEL", "qwen-max")
+DEFAULT_DB = os.environ.get("MIMIR_DB_PATH", "./mimir.db")
 
 
 class MemoryAgent:
-    """Persistent-memory AI agent: Qwen Cloud reasoning + Mimir memory."""
+    """Persistent-memory AI agent: Qwen Cloud reasoning + embedded Mimir store."""
 
-    def __init__(
-        self,
-        api_key: str | None = None,
-        model: str = "qwen-max",
-        mimir_binary: str = MIMIR_BINARY,
-        mimir_db: str = MIMIR_DB,
-    ):
-        self.minir_db = mimir_db
+    def __init__(self, api_key=None, model=DEFAULT_MODEL, mimir_db=DEFAULT_DB,
+                 tool_model=TOOL_MODEL):
+        self.mimir_db = mimir_db
         self.model = model
+        self.tool_model = tool_model
         self.turn_count = 0
         self.session_start = datetime.now(timezone.utc)
-
-        # Initialize components
-        self.mimir = MimirBridge(binary=mimir_binary, db_path=mimir_db)
         self.qwen = QwenClient(api_key=api_key, model=model)
-
-        # Conversation history (current session)
-        self.history: list[dict] = []
-
-        # Stats
+        self.mimir = MimirBridge(db_path=mimir_db, embed_fn=self.qwen.embed)
+        self.history = []
         self.memories_stored = 0
         self.memories_recalled = 0
 
-    def process(self, user_message: str) -> str:
-        """Process a user message through the memory-augmented agent loop.
-
-        1. Recall relevant memories from Mimir
-        2. Build context with memories + conversation history
-        3. Get response from Qwen Cloud model
-        4. Extract and store new memories
-        5. Return response
-        """
+    def process(self, user_message):
         self.turn_count += 1
-
-        # Step 1: Recall relevant memories
         memories = self._recall_memories(user_message)
         memory_context = self._format_memories(memories)
-
-        # Step 2: Build messages for the model
         messages = self._build_messages(user_message, memory_context)
-
-        # Step 3: Get model response
-        response = self.qwen.chat(
-            messages=messages,
-            system=SYSTEM_PROMPT,
-            temperature=0.7,
-        )
-
-        # Step 4: Extract and store new memories
+        response = self.qwen.chat(messages=messages, system=SYSTEM_PROMPT,
+                                  temperature=0.7)
         self._store_new_memories(user_message, response)
-
-        # Step 5: Update history
         self.history.append({"role": "user", "content": user_message})
         self.history.append({"role": "assistant", "content": response})
-
-        # Periodic grooming every 10 turns
         if self.turn_count % 10 == 0:
             self._groom_memory()
-
         return response
 
-    def _recall_memories(self, query: str) -> list[dict]:
-        """Search Mimir for memories relevant to the current query."""
-        # Use multiple recall strategies
-        results = []
+    def _recall_memories(self, query):
+        results = self.mimir.recall(query=query, limit=8, mode="hybrid")
+        seen = {(r["category"], r["key"]) for r in results}
+        for category in ("user_preference", "project_fact"):
+            for r in self.mimir.recall(query=query, limit=3, category=category,
+                                       mode="hybrid"):
+                k = (r["category"], r["key"])
+                if k not in seen:
+                    seen.add(k)
+                    results.append(r)
+        self.memories_recalled += len(results)
+        return results[:10]
 
-        # FTS5 keyword search
-        fts_results = self.mimir.recall(query=query, limit=5)
-        results.extend(fts_results)
-
-        # Also search for user preferences and project facts
-        for category in ["user_preference", "project_fact"]:
-            cat_results = self.mimir.recall(
-                query=query, limit=3, category=category
-            )
-            results.extend(cat_results)
-
-        # Deduplicate by key
-        seen = set()
-        unique = []
-        for r in results:
-            rkey = (r.get("category", ""), r.get("key", ""))
-            if rkey not in seen:
-                seen.add(rkey)
-                unique.append(r)
-
-        self.memories_recalled += len(unique)
-        return unique[:10]
-
-    def _format_memories(self, memories: list[dict]) -> str:
-        """Format recalled memories as a context block for the model."""
+    def _format_memories(self, memories):
         if not memories:
-            return "(No relevant memories from past sessions)"
-
+            return "(No relevant memories from past sessions yet.)"
         lines = ["[Memories from past sessions]"]
         for m in memories:
-            cat = m.get("category", "general")
-            key = m.get("key", "unknown")
-            content = m.get("content", m.get("summary", str(m)[:200]))
-            lines.append(f"  [{cat}] {key}: {content}")
+            lines.append(f"  [{m['category']}] {m['key']}: {m['content']}")
         return "\n".join(lines)
 
-    def _build_messages(
-        self, user_message: str, memory_context: str
-    ) -> list[dict]:
-        """Build the message list for the model, including memory context."""
-        # Include last 10 turns of conversation history
-        recent_history = self.history[-20:] if self.history else []
-
-        # Prepend memory context to the first user message of this turn
-        messages = list(recent_history)
+    def _build_messages(self, user_message, memory_context):
+        recent = self.history[-20:] if self.history else []
+        messages = list(recent)
         messages.append({
             "role": "user",
             "content": f"{memory_context}\n\n---\n\nCurrent message: {user_message}",
         })
         return messages
 
-    def _store_new_memories(self, user_message: str, assistant_response: str):
-        """Extract new facts from the conversation and store in Mimir."""
-        prompt = MEMORY_EXTRACTION_PROMPT.format(
-            user_message=user_message,
-            assistant_response=assistant_response,
-        )
-
+    def _store_new_memories(self, user_message, assistant_response):
+        """Let Qwen decide what to remember via native function calling."""
         try:
-            extraction_response = self.qwen.chat(
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.3,
-                max_tokens=2048,
+            msg = self.qwen.chat_with_tools(
+                messages=[{
+                    "role": "user",
+                    "content": (
+                        "Decide what (if anything) to remember from this exchange.\n\n"
+                        f"User: {user_message}\nAssistant: {assistant_response}"
+                    ),
+                }],
+                tools=STORE_TOOL,
+                tool_choice={"type": "function",
+                             "function": {"name": "store_memories"}},
+                model=self.tool_model,
             )
+        except Exception as e:
+            print(f"[memory extraction skipped: {e}]", file=sys.stderr)
+            return
 
-            # Parse the JSON array
-            # Handle potential markdown code blocks
-            text = extraction_response.strip()
-            if text.startswith("```"):
-                text = text.split("```")[1]
-                if text.startswith("json"):
-                    text = text[4:]
-                text = text.strip()
-
-            items = json.loads(text)
-
-            for item in items:
-                if not isinstance(item, dict):
-                    continue
-                category = item.get("category", "general")
-                key = item.get("key", f"memory-{int(time.time())}")
-                content = item.get("content", "")
-                importance = item.get("importance", 0.5)
-
-                if content:
-                    self.mimir.remember(
-                        category=category,
-                        key=key,
-                        content=content,
-                        importance=importance,
-                    )
-                    self.memories_stored += 1
-
-        except (json.JSONDecodeError, Exception) as e:
-            # Non-critical: memory extraction is best-effort
-            print(f"[memory extraction note: {e}]", file=sys.stderr)
+        if not getattr(msg, "tool_calls", None):
+            return
+        try:
+            args = json.loads(msg.tool_calls[0].function.arguments)
+        except (json.JSONDecodeError, AttributeError, IndexError):
+            return
+        for item in args.get("items", []):
+            if not isinstance(item, dict) or not item.get("content"):
+                continue
+            self.mimir.remember(
+                category=item.get("category", "insight"),
+                key=item.get("key", f"mem-{self.turn_count}"),
+                content=item["content"],
+                importance=float(item.get("importance", 0.5)),
+            )
+            self.memories_stored += 1
 
     def _groom_memory(self):
-        """Run memory grooming: decay + coherence pass."""
         try:
-            self.mimir.decay()
             self.mimir.cohere()
             print("[memory grooming complete]", file=sys.stderr)
         except Exception as e:
             print(f"[grooming note: {e}]", file=sys.stderr)
 
-    def get_stats(self) -> dict:
-        """Return agent statistics."""
+    def get_stats(self):
         return {
             "session_start": self.session_start.isoformat(),
             "turn_count": self.turn_count,
             "memories_stored": self.memories_stored,
             "memories_recalled": self.memories_recalled,
             "model": self.model,
-            "history_turns": len(self.history) // 2,
+            "tool_model": self.tool_model,
         }
 
-    def get_mimir_stats(self) -> dict:
-        """Get Mimir database statistics."""
+    def get_mimir_stats(self):
         return self.mimir.stats()
 
 
-# Single-turn convenience
-def ask(question: str, api_key: str | None = None) -> str:
+def ask(question, api_key=None):
     """Quick single-turn query with memory."""
-    agent = MemoryAgent(api_key=api_key)
-    return agent.process(question)
+    return MemoryAgent(api_key=api_key).process(question)
 
 
 if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Mimir MemoryAgent — Persistent AI memory on Qwen Cloud"
+        description="Mimir MemoryAgent -- persistent AI memory on Qwen Cloud"
     )
-    parser.add_argument(
-        "--api-key",
-        default=os.environ.get("QWEN_CLOUD_API_KEY", ""),
-        help="Qwen Cloud API key",
-    )
-    parser.add_argument(
-        "--model",
-        default="qwen-max",
-        help="Qwen Cloud model to use",
-    )
-    parser.add_argument(
-        "--mimir-binary",
-        default=MIMIR_BINARY,
-        help="Path to Mimir binary",
-    )
-    parser.add_argument(
-        "--mimir-db",
-        default=MIMIR_DB,
-        help="Path to Mimir SQLite database",
-    )
-    parser.add_argument(
-        "--interactive",
-        "-i",
-        action="store_true",
-        help="Run in interactive mode",
-    )
-    parser.add_argument(
-        "message",
-        nargs="*",
-        help="Message to send (non-interactive mode)",
-    )
-
+    parser.add_argument("--api-key", default=os.environ.get("QWEN_CLOUD_API_KEY", ""))
+    parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument("--mimir-db", default=DEFAULT_DB)
+    parser.add_argument("--interactive", "-i", action="store_true")
+    parser.add_argument("message", nargs="*")
     args = parser.parse_args()
 
     if not args.api_key:
-        print("Error: QWEN_CLOUD_API_KEY required.", file=sys.stderr)
-        print("  export QWEN_CLOUD_API_KEY=your_key", file=sys.stderr)
-        print("  or pass --api-key", file=sys.stderr)
+        print("Error: QWEN_CLOUD_API_KEY required (export it or pass --api-key).",
+              file=sys.stderr)
         sys.exit(1)
 
-    agent = MemoryAgent(
-        api_key=args.api_key,
-        model=args.model,
-        mimir_binary=args.mimir_binary,
-        mimir_db=args.mimir_db,
-    )
+    agent = MemoryAgent(api_key=args.api_key, model=args.model, mimir_db=args.mimir_db)
 
     if args.interactive:
-        print("Mimir MemoryAgent — type /stats, /exit, or your message")
-        print(f"Model: {args.model} | Mimir: {args.mimir_db}")
+        print("Mimir MemoryAgent -- type /stats, /exit, or your message")
+        print(f"Model: {args.model} | Tool model: {agent.tool_model} | DB: {args.mimir_db}")
         print("-" * 60)
         try:
             while True:
@@ -342,21 +231,16 @@ if __name__ == "__main__":
                 if user_input == "/exit":
                     break
                 if user_input == "/stats":
-                    stats = agent.get_stats()
-                    mimir_stats = agent.get_mimir_stats()
-                    print(f"\nAgent stats: {json.dumps(stats, indent=2)}")
-                    print(f"Mimir stats: {json.dumps(mimir_stats, indent=2)}")
+                    print(json.dumps(agent.get_stats(), indent=2))
+                    print(json.dumps(agent.get_mimir_stats(), indent=2))
                     continue
-
-                print(f"\nAgent: ", end="", flush=True)
-                response = agent.process(user_input)
-                print(response)
+                print("\nAgent: ", end="", flush=True)
+                print(agent.process(user_input))
         except (KeyboardInterrupt, EOFError):
-            print("\n")
+            print()
     else:
         message = " ".join(args.message)
         if not message:
             print("Enter a message or use --interactive", file=sys.stderr)
             sys.exit(1)
-        response = agent.process(message)
-        print(response)
+        print(agent.process(message))

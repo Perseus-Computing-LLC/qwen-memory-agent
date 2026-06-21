@@ -2,105 +2,112 @@
 
 **Every AI agent forgets everything between sessions. Mimir fixes that.**
 
-Mimir is a persistent-memory backend for AI agents. It remembers facts, preferences, and decisions across sessions — and forgets what's stale. Powered by Qwen Cloud reasoning models.
+Mimir MemoryAgent is a persistent-memory AI agent built on **Qwen Cloud**. It
+remembers facts, preferences, and decisions across sessions, recalls them with
+hybrid search, and lets stale memories fade with Ebbinghaus-style decay — so the
+agent gets more useful the more you talk to it.
 
 Built for **Track 1: MemoryAgent** of the [Qwen Cloud Global AI Hackathon 2026](https://qwencloud-hackathon.devpost.com/).
 
+▶️ **[Watch the demo](https://devpost.com/software/mimir-memoryagent-persistent-ai-memory-on-qwen-cloud)** · 📜 [Demo script](docs/demo_script.md)
+
 ## The problem
 
-LLMs are stateless. Every conversation starts from zero. They can't remember:
+LLMs are stateless. Every conversation starts from zero. They can't remember
+what you're building, the stack you prefer, the decision you made last week, or
+that you already tried an approach that failed. Developers paper over this with
+context-stuffing and endless repetition.
 
-- What project you're working on
-- That you prefer DeepSeek over Claude
-- The architecture decision you made last week
-- That you already tried approach X and it failed
-
-Developers work around this with context stuffing, long system prompts, and
-repeating themselves endlessly. It's wasteful and frustrating.
-
-## What Mimir does
+## What it does
 
 ```
-Session 1: "I'm building Perseus — a context engine for AI agents."
-  → Mimir stores: project_fact/perseus-context-engine
+Session 1: "I'm building Perseus — a live context engine for AI agents."
+  → stores  project_fact/perseus
 
 Session 2 (days later): "What was I working on?"
-  → Mimir recalls: "You're building Perseus, a context engine for AI agents"
-  → Agent responds with full context, no repetition needed
+  → recalls "You're building Perseus, a live context engine for AI agents."
 
-Session 3: "I prefer DeepSeek V4 over Claude."
-  → Mimir stores: user_preference/prefers-deepseek
+Session 3: "I prefer TypeScript over Python for new services."
+  → stores  user_preference/lang-typescript
 
-Session 4: "Which model should I use for this task?"
-  → Mimir recalls the preference
-  → Agent recommends DeepSeek based on stored preference
+Session 4: "Scaffold me a new service."
+  → recalls the preference and scaffolds in TypeScript, unprompted
 
-Session 5 (weeks later): "Remember that project?"
-  → Old, unused memories have decayed — they don't clutter context
-  → Critical facts (stored with high importance) persist
+Session 5 (weeks later): unused small-talk has decayed and no longer clutters
+  context — while high-importance facts persist.
 ```
+
+## Deep Qwen Cloud integration
+
+Mimir doesn't just call an LLM — it uses three distinct Qwen Cloud capabilities:
+
+| Capability | Qwen feature | Where |
+|---|---|---|
+| Reasoning over long multi-session context | `qwen-max-longcontext` | every turn |
+| Deciding what to remember | **native function calling** (`store_memories` tool) | after every turn |
+| Semantic recall | `text-embedding-v3` embeddings (hybrid with FTS5) | every recall |
+
+The agent never hand-parses JSON out of prose: Qwen's function calling returns a
+structured `store_memories` call, so memory writes are reliable by construction.
 
 ## Architecture
 
 ```
-User ↔ MemoryAgent (Python) ↔ Qwen Cloud API (reasoning)
-                                ↕
-                           Mimir (memory backend)
+User ↔ agent.py ──(reasoning)─▶ Qwen Cloud  qwen-max-longcontext
+           │  ▲
+   recall  │  │ remember (Qwen function calling)
+           ▼  │
+        mimir_bridge.py ─ SQLite + FTS5 + Qwen embeddings + Ebbinghaus decay
 
-Memory Agent loop:
-  1. RECALL  — Search Mimir for relevant memories (FTS5 + vector hybrid)
-  2. REASON  — Pass user message + recalled context to Qwen Cloud model
-  3. REMEMBER — Extract new facts from the response, store in Mimir
-  4. GROOM   — Periodically run decay + coherence (Ebbinghaus-based)
+Each turn:
+  1. RECALL    hybrid search (FTS5 keyword + Qwen-embedding cosine), decay-weighted
+  2. REASON    user message + recalled memories → qwen-max-longcontext
+  3. REMEMBER  Qwen function-calls store_memories(...) → persisted to SQLite
+  4. GROOM     every 10 turns: Ebbinghaus decay + dedupe
 ```
 
-## Why Mimir wins the MemoryAgent track
+## Memory backend
 
-Mimir isn't a hackathon prototype — it's a **production memory system** with:
+`src/mimir_bridge.py` is a **self-contained, stdlib-only** persistent store — no
+external daemon, no setup. It implements the same model as Perseus Computing's
+production [Mimir](https://perseus.observer) system:
 
-- **Structured entities** — category, key, body_json model for clean organization
-- **FTS5 + vector hybrid search** — fast keyword search + semantic similarity
-- **Ebbinghaus decay** — memories lose relevance over time, mimicking human forgetting
-- **AES-256-GCM encryption** — all memories encrypted at rest
-- **Cross-session persistence** — SQLite-backed, survives reboots
-- **27 MCP tools** — remember, recall, recall_when, embed, decay, cohere, synthesize...
+- **Structured entities** — `category / key / content / importance`
+- **FTS5 full-text search** (with a `LIKE` fallback if FTS5 isn't compiled in)
+- **Hybrid recall** — keyword + Qwen-embedding semantic similarity, score-fused
+- **Ebbinghaus decay** — unused memories fade; recall reinforces; important ones persist
+- **Cross-session persistence** — one SQLite file, survives reboots
 
-Competitors are building memory from scratch. We're integrating a production system.
+> The production Mimir backend adds a Rust core, AES-256-GCM encryption at rest,
+> 27 MCP tools, and cross-workspace federation. This repo ships a compact,
+> auditable version so you can run the whole thing in under a minute.
 
 ## Quickstart
 
 ```bash
-# 1. Clone
 git clone https://github.com/Perseus-Computing-LLC/qwen-memory-agent.git
 cd qwen-memory-agent
-
-# 2. Install dependencies
 pip install -r requirements.txt
 
-# 3. Set your Qwen Cloud API key
-export QWEN_CLOUD_API_KEY=your_key_here
+export QWEN_CLOUD_API_KEY=your_key_here   # or: cp .env.example .env && edit
 
-# 4. Start Mimir (persistent memory server)
-/opt/data/webui/minions/.minions-data/mimir/mimir serve --db mimir.db &
-
-# 5. Run the agent
 python src/agent.py --interactive
 ```
 
-## Demo
+The SQLite memory DB is created automatically at `./mimir.db`. Quit, re-run
+later, and the agent still remembers. Type `/stats` to inspect the store.
 
-Watch the [demo video](docs/demo_script.md) showing 5 sessions of memory accumulation across time — the agent remembers your project, your preferences, and forgets what's stale.
+## Run the multi-session demo
+
+Follow [docs/demo_script.md](docs/demo_script.md) to reproduce the five-session
+memory-accumulation-and-decay walkthrough from the video.
 
 ## Built with
 
-- **Qwen Cloud** — reasoning models (OpenAI-compatible API)
-- **Mimir** — persistent memory backend (27 MCP tools, FTS5 + vector search)
-- **Python** — agent orchestration layer
+- **Qwen Cloud** — `qwen-max-longcontext` reasoning, native function calling, `text-embedding-v3`
+- **Python** — agent orchestration via the `openai` SDK against Qwen's OpenAI-compatible API
+- **SQLite + FTS5** — embedded persistent memory
 
 ## License
 
-MIT — Perseus Computing LLC
-
----
-
-Built for the Qwen Cloud Global AI Hackathon 2026 · Track 1: MemoryAgent
+MIT © Perseus Computing LLC
