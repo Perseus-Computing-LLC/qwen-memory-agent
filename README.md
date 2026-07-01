@@ -1,8 +1,8 @@
-# Mneme MemoryAgent — Persistent AI Memory on Qwen Cloud
+# Perseus Vault MemoryAgent — Persistent AI Memory on Qwen Cloud
 
-**Every AI agent forgets everything between sessions. Mneme fixes that.**
+**Every AI agent forgets everything between sessions. Perseus Vault fixes that.**
 
-Mneme MemoryAgent is a persistent-memory AI agent built on **Qwen Cloud**. It
+Perseus Vault MemoryAgent is a persistent-memory AI agent built on **Qwen Cloud**. It
 remembers facts, preferences, and decisions across sessions, recalls them with
 hybrid search, and lets stale memories fade with Ebbinghaus-style decay — so the
 agent gets more useful the more you talk to it.
@@ -39,7 +39,7 @@ Session 5 (weeks later): unused small-talk has decayed and no longer clutters
 
 ## Deep Qwen Cloud integration
 
-Mneme doesn't just call an LLM — it uses three distinct Qwen Cloud capabilities:
+Perseus Vault doesn't just call an LLM — it uses three distinct Qwen Cloud capabilities:
 
 <!-- devpost link and repo below retain "mimir" — legacy external URL/filename, unchanged -->
 
@@ -72,7 +72,7 @@ Each turn:
 
 `src/mimir_bridge.py` is a **self-contained, stdlib-only** persistent store — no
 external daemon, no setup. It implements the same model as Perseus Computing's
-production [Mneme](https://perseus.observer) system:
+production [Perseus Vault](https://perseus.observer) system:
 
 - **Structured entities** — `category / key / content / importance`
 - **FTS5 full-text search** (with a `LIKE` fallback if FTS5 isn't compiled in)
@@ -80,7 +80,7 @@ production [Mneme](https://perseus.observer) system:
 - **Ebbinghaus decay** — unused memories fade; recall reinforces; important ones persist
 - **Cross-session persistence** — one SQLite file, survives reboots
 
-> The production Mneme backend adds a Rust core, AES-256-GCM encryption at rest,
+> The production Perseus Vault backend adds a Rust core, AES-256-GCM encryption at rest,
 > 27 MCP tools, and cross-workspace federation. This repo ships a compact,
 > auditable version so you can run the whole thing in under a minute.
 

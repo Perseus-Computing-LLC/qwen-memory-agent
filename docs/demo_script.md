@@ -1,4 +1,4 @@
-# Mneme MemoryAgent — 5-Session Demo Script
+# Perseus Vault MemoryAgent — 5-Session Demo Script
 
 This reproduces the demo video: an agent that accumulates memory across
 sessions, recalls it, and lets unused facts decay. Each "session" is a fresh
@@ -19,7 +19,7 @@ pip install -r requirements.txt
 ```
 python src/agent.py --interactive
 You: I'm building Perseus, a live context engine for AI agents.
-You: The backend is Rust and the memory layer is called Mneme.
+You: The backend is Rust and the memory layer is called Perseus Vault.
 You: /stats        # see the project_fact entries that were stored
 You: /exit
 ```
@@ -29,7 +29,7 @@ You: /exit
 ```
 python src/agent.py --interactive
 You: What am I working on?
-# → recalls Perseus + the Rust / Mneme details from Session 1
+# → recalls Perseus + the Rust / Perseus Vault details from Session 1
 You: /exit
 ```
 
