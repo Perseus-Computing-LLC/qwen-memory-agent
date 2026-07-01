@@ -1,34 +1,35 @@
-# Architecture — Mneme MemoryAgent
+# Architecture — Perseus Vault MemoryAgent
 
 ## System Overview
 
 ```
-┌─────────────┐       ┌─────────────────┐       ┌────────────────┐
-│   User      │──────▶│  MemoryAgent    │──────▶│  Qwen Cloud    │
-│   (CLI)     │◀──────│  (Python)       │◀──────│  (Reasoning)   │
-└─────────────┘       │                 │       └────────────────┘
+┌─────────────┐       ┌─────────────────┐       ┌────────────────────┐
+│   User      │──────▶│  MemoryAgent    │──────▶│  Qwen Cloud        │
+│   (CLI)     │◀──────│  (Python)       │◀──────│  (Reasoning)       │
+└─────────────┘       │                 │       └────────────────────┘
                       │  ┌───────────┐  │
-                      │  │  Mneme    │  │
-                      │  │  Bridge   │──┼──────▶┌────────────────┐
-                      │  └───────────┘  │       │  Mneme (Rust)  │
-                      └─────────────────┘       │  ┌───────────┐ │
-                                                │  │ SQLite DB │ │
-                                                │  │ (AES-256) │ │
-                                                │  └───────────┘ │
-                                                └────────────────┘
+                      │  │  Vault    │  │
+                      │  │  Bridge   │──┼──────▶┌────────────────────┐
+                      │  └───────────┘  │       │  Perseus Vault     │
+                      └─────────────────┘       │  (Rust)            │
+                                                 │  ┌───────────┐     │
+                                                 │  │ SQLite DB │     │
+                                                 │  │ (AES-256) │     │
+                                                 │  └───────────┘     │
+                                                 └────────────────────┘
 ```
 
 ## Components
 
 ### 1. MemoryAgent (`src/agent.py`)
 Orchestration layer. Implements the core loop:
-- **Recall** facts from Mneme before each response
+- **Recall** facts from Perseus Vault before each response
 - **Reason** using Qwen Cloud models with recalled context
 - **Remember** new facts extracted from the conversation
 - **Groom** memory periodically (decay + coherence)
 
 ### 2. Mimir Bridge (`src/mimir_bridge.py`)
-Client for the Mneme persistent memory server. Wraps:
+Client for the Perseus Vault persistent memory server. Wraps:
 - `remember()` — store structured entities
 - `recall()` — FTS5 keyword search + vector hybrid
 - `decay()` — Ebbinghaus-based forgetting
@@ -42,7 +43,7 @@ OpenAI-compatible wrapper for Qwen Cloud:
 
 ## Memory Model
 
-Mneme stores entities as:
+Perseus Vault stores entities as:
 ```json
 {
   "category": "user_preference | project_fact | decision | correction | insight",
@@ -70,7 +71,7 @@ Mneme stores entities as:
 ## Data Flow
 
 ### Session Start
-1. Agent loads → Mneme health check
+1. Agent loads → Perseus Vault health check
 2. User sends message
 3. `mimir_recall()` searches for relevant memories
 4. Memories formatted as context block
@@ -97,7 +98,7 @@ mimir_bridge.cohere()   # Auto-link related entities
 
 - **AES-256-GCM**: All memories encrypted at rest
 - **API keys**: Never stored in code; environment variables only
-- **No telemetry**: Mneme runs fully local
+- **No telemetry**: Perseus Vault runs fully local
 
 ## Trade-offs
 

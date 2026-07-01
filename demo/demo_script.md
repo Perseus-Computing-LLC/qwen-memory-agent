@@ -1,4 +1,4 @@
-# Mneme MemoryAgent — Demo Script
+# Perseus Vault MemoryAgent — Demo Script
 
 **Duration:** ~2:50 | **Format:** Terminal simulation with HTML/CSS
 
@@ -6,8 +6,8 @@
 
 ```
 $ python src/agent.py --interactive
-Mneme MemoryAgent — type /stats, /exit, or your message
-Model: qwen-max | Mneme: /opt/data/webui/minions/.minions-data/mimir/mimir.db
+Perseus Vault MemoryAgent — type /stats, /exit, or your message
+Model: qwen-max | Perseus Vault: /opt/data/webui/minions/.minions-data/mimir/mimir.db
 ------------------------------------------------------------
 
 You: Hello! I'm Thomas. I'm building Perseus — a context engine for AI agents.
@@ -30,8 +30,8 @@ your roadmap?
 [NEW SESSION — days later]
 
 $ python src/agent.py --interactive
-Mneme MemoryAgent — type /stats, /exit, or your message
-Model: qwen-max | Mneme: /opt/data/webui/minions/.minions-data/mimir/mimir.db
+Perseus Vault MemoryAgent — type /stats, /exit, or your message
+Model: qwen-max | Perseus Vault: /opt/data/webui/minions/.minions-data/mimir/mimir.db
 ------------------------------------------------------------
 
 You: What was I working on last time?
@@ -81,7 +81,7 @@ Agent stats:
   "history_turns": 5
 }
 
-Mneme stats:
+Perseus Vault stats:
 {
   "total_entities": 45,
   "categories": {
@@ -112,19 +112,19 @@ Agent: [Recalling 6 related memories...]
 This is a significant architecture decision. Let me surface what I know:
 
 From memory:
-  • You standardized on MCP for Mneme's API (June 2026 — decision/mimir-mcp-api)
+  • You standardized on MCP for Perseus Vault's API (June 2026 — decision/mimir-mcp-api)
   • You chose JSON-RPC 2.0 over gRPC for simplicity (decision/jsonrpc-over-grpc)
   • Your preference for "strip to essentials" (user_preference/minimalist-stack)
 
-Based on your track record: MCP aligns with your existing Mneme architecture
+Based on your track record: MCP aligns with your existing Perseus Vault architecture
 and keeps the stack consistent. REST would mean maintaining two API surfaces.
-My recommendation: MCP, consistent with Mneme.
+My recommendation: MCP, consistent with Perseus Vault.
 
 But I want your call — this is a human-in-the-loop decision. What do you think?
 
 You: MCP it is. Good recall.
 
 Agent: Decision stored: Perseus API surface = MCP (June 2026). Rationale:
-consistent with Mneme, avoids dual API surfaces, aligns with minimalist
+consistent with Perseus Vault, avoids dual API surfaces, aligns with minimalist
 preference. I'll reference this if similar API questions come up.
 ```
